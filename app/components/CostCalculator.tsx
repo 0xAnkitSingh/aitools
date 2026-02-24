@@ -2,14 +2,12 @@
 
 import { useState, useMemo, useCallback, useEffect } from "react";
 import {
-  MODELS,
-  PROVIDERS,
+  MODELS as FALLBACK_MODELS,
   USAGE_PRESETS,
   calculateCost,
   formatCurrency,
   formatTokens,
   type Model,
-  type Provider,
 } from "@/app/lib/models";
 
 interface SavedCalculation {
@@ -40,10 +38,17 @@ const TIER_LABELS: Record<string, string> = {
 };
 
 export default function CostCalculator() {
+  const [models, setModels] = useState<Model[]>(FALLBACK_MODELS);
+  const [providers, setProviders] = useState<string[]>([...new Set(FALLBACK_MODELS.map((m) => m.provider))]);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [priceSource, setPriceSource] = useState<string>("hardcoded-fallback");
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshMessage, setRefreshMessage] = useState<string | null>(null);
+
   const [selectedModel, setSelectedModel] = useState<Model>(
-    MODELS.find((m) => m.id === "gpt-3.5-turbo")!
+    FALLBACK_MODELS.find((m) => m.id === "gpt-3.5-turbo")!
   );
-  const [selectedProvider, setSelectedProvider] = useState<Provider>("OpenAI");
+  const [selectedProvider, setSelectedProvider] = useState<string>("OpenAI");
   const [tierFilter, setTierFilter] = useState<TierFilter>("all");
   const [selectedPreset, setSelectedPreset] = useState(USAGE_PRESETS[0]);
   const [inputTokens, setInputTokens] = useState(USAGE_PRESETS[0].inputTokens);
@@ -61,13 +66,30 @@ export default function CostCalculator() {
     }
   }, []);
 
+  useEffect(() => {
+    fetch("/api/models")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.models?.length > 0) {
+          setModels(data.models);
+          setProviders(data.providers ?? [...new Set(data.models.map((m: Model) => m.provider))]);
+          setLastUpdated(data.lastUpdated);
+          setPriceSource(data.source ?? "mongodb");
+          const current = data.models.find((m: Model) => m.id === selectedModel.id);
+          if (current) setSelectedModel(current);
+        }
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const filteredModels = useMemo(() => {
-    return MODELS.filter(
+    return models.filter(
       (m) =>
         m.provider === selectedProvider &&
         (tierFilter === "all" || m.tier === tierFilter)
     );
-  }, [selectedProvider, tierFilter]);
+  }, [models, selectedProvider, tierFilter]);
 
   const cost = useMemo(
     () => calculateCost(selectedModel, inputTokens, outputTokens, requestsPerDay, daysPerMonth),
@@ -107,10 +129,10 @@ export default function CostCalculator() {
   }, [calcName, selectedModel, selectedPreset, inputTokens, outputTokens, requestsPerDay, daysPerMonth, cost, savedCalcs]);
 
   const loadCalc = useCallback((calc: SavedCalculation) => {
-    const model = MODELS.find((m) => m.id === calc.modelId);
+    const model = models.find((m) => m.id === calc.modelId);
     if (model) {
       setSelectedModel(model);
-      setSelectedProvider(model.provider as Provider);
+      setSelectedProvider(model.provider);
     }
     const preset = USAGE_PRESETS.find((p) => p.id === calc.presetId);
     if (preset) setSelectedPreset(preset);
@@ -119,7 +141,41 @@ export default function CostCalculator() {
     setRequestsPerDay(calc.requestsPerDay);
     setDaysPerMonth(calc.daysPerMonth);
     setShowSaved(false);
-  }, []);
+  }, [models]);
+
+  const handleRefreshPrices = useCallback(async (force?: boolean) => {
+    setIsRefreshing(true);
+    setRefreshMessage(null);
+    try {
+      const res = await fetch("/api/models/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: force === true }),
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        setRefreshMessage(`Prices refreshed: ${data.modelsUpdated} models updated.`);
+        const fetchRes = await fetch("/api/models");
+        const fetchData = await fetchRes.json();
+        if (fetchData.models?.length > 0) {
+          setModels(fetchData.models);
+          setProviders(fetchData.providers ?? [...new Set(fetchData.models.map((m: Model) => m.provider))]);
+          setLastUpdated(fetchData.lastUpdated ?? data.lastUpdated);
+          setPriceSource(fetchData.source ?? "mongodb");
+          const current = fetchData.models.find((m: Model) => m.id === selectedModel.id);
+          if (current) setSelectedModel(current);
+        }
+      } else if (data.status === "skipped") {
+        setRefreshMessage(data.message ?? "Refresh skipped (recently updated).");
+      } else {
+        setRefreshMessage(data.message ?? "Refresh failed.");
+      }
+    } catch {
+      setRefreshMessage("Failed to refresh prices.");
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [selectedModel.id]);
 
   const deleteCalc = useCallback((id: string) => {
     const updated = savedCalcs.filter((c) => c.id !== id);
@@ -151,6 +207,39 @@ export default function CostCalculator() {
       </header>
 
       <main className="mx-auto max-w-6xl px-4 pb-20 sm:px-6 lg:px-8">
+        {/* Pricing Status Banner */}
+        <div className="mb-6 rounded-2xl border border-slate-700/50 bg-slate-800/50 backdrop-blur-sm p-4">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <span
+                className={`inline-block h-3 w-3 rounded-full flex-shrink-0 ${
+                  priceSource === "hardcoded-fallback" ? "bg-amber-400" : "bg-emerald-400"
+                }`}
+              />
+              <div>
+                <p className="text-sm text-white">
+                  {lastUpdated
+                    ? `Prices updated ${new Date(lastUpdated).toLocaleDateString()}`
+                    : "Using fallback pricing data"}
+                </p>
+                <p className="text-xs text-slate-500">{models.length} models</p>
+              </div>
+            </div>
+            <button
+              onClick={() => handleRefreshPrices(true)}
+              disabled={isRefreshing}
+              className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-violet-500 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isRefreshing ? "Refreshing…" : "Refresh Prices"}
+            </button>
+          </div>
+          {refreshMessage && (
+            <p className="mt-3 text-sm text-slate-400 border-t border-slate-700/50 pt-3">
+              {refreshMessage}
+            </p>
+          )}
+        </div>
+
         {/* Selected Model Banner */}
         <div className="mb-8 rounded-2xl border border-slate-700/50 bg-slate-800/50 backdrop-blur-sm p-5 flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-4">
@@ -264,7 +353,7 @@ export default function CostCalculator() {
 
               {/* Provider tabs */}
               <div className="flex flex-wrap gap-2 mb-4">
-                {PROVIDERS.map((provider) => (
+                {providers.map((provider) => (
                   <button
                     key={provider}
                     onClick={() => setSelectedProvider(provider)}
@@ -364,7 +453,7 @@ export default function CostCalculator() {
                       <div className="cursor-pointer min-w-0" onClick={() => loadCalc(calc)}>
                         <p className="font-medium text-sm text-white truncate">{calc.name}</p>
                         <p className="text-xs text-slate-500">
-                          {MODELS.find((m) => m.id === calc.modelId)?.name} &middot; {formatCurrency(calc.monthlyCost)}/mo
+                          {models.find((m) => m.id === calc.modelId)?.name ?? calc.modelId} &middot; {formatCurrency(calc.monthlyCost)}/mo
                         </p>
                       </div>
                       <button
@@ -386,7 +475,7 @@ export default function CostCalculator() {
           </div>
 
           {/* Right Column - Cost Estimate */}
-          <div className="space-y-6 lg:sticky lg:top-6 lg:self-start">
+          <div className="space-y-6 lg:sticky lg:top-16 lg:self-start">
             <div className="rounded-2xl border border-slate-700/50 bg-slate-800/50 backdrop-blur-sm p-6">
               <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-1">Cost Estimate</h2>
               <p className="text-xs text-slate-500 mb-6">Based on your current configuration</p>
@@ -474,7 +563,7 @@ export default function CostCalculator() {
             <div className="rounded-2xl border border-slate-700/50 bg-slate-800/50 backdrop-blur-sm p-6">
               <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Quick Compare (same usage)</p>
               <div className="space-y-2">
-                {MODELS
+                {models
                   .filter((m) => m.id !== selectedModel.id)
                   .sort((a, b) => {
                     const ca = calculateCost(a, inputTokens, outputTokens, requestsPerDay, daysPerMonth).monthlyCost;
@@ -490,7 +579,7 @@ export default function CostCalculator() {
                         key={m.id}
                         onClick={() => {
                           selectModel(m);
-                          setSelectedProvider(m.provider as Provider);
+                          setSelectedProvider(m.provider);
                         }}
                         className="w-full text-left flex items-center justify-between rounded-lg border border-slate-700/30 bg-slate-900/30 p-3 hover:bg-slate-800/50 transition-colors"
                       >
