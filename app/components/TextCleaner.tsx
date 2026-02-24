@@ -75,6 +75,15 @@ export default function TextCleaner() {
     totalCleaned: 0,
   });
 
+  useEffect(() => {
+    fetch("/api/stats")
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.error) setGlobalStats(data);
+      })
+      .catch(() => {});
+  }, []);
+
   const toggleOption = useCallback((key: keyof CleaningOptions) => {
     setOptions((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
@@ -83,22 +92,35 @@ export default function TextCleaner() {
     setOptions(DEFAULT_OPTIONS);
   }, []);
 
-  const handleClean = useCallback(() => {
+  const handleClean = useCallback(async () => {
     if (!input.trim()) return;
     const result = cleanText(input, options);
     setOutput(result.cleaned);
     setStats(result.stats);
-    setGlobalStats((prev) => ({
-      hiddenChars: prev.hiddenChars + result.stats.hiddenChars,
-      nonBreakingSpaces: prev.nonBreakingSpaces + result.stats.nonBreakingSpaces,
-      dashesNormalized: prev.dashesNormalized + result.stats.dashesNormalized,
-      quotesNormalized: prev.quotesNormalized + result.stats.quotesNormalized,
-      ellipsesConverted: prev.ellipsesConverted + result.stats.ellipsesConverted,
-      trailingWhitespace: prev.trailingWhitespace + result.stats.trailingWhitespace,
-      asterisksRemoved: prev.asterisksRemoved + result.stats.asterisksRemoved,
-      markdownHeadings: prev.markdownHeadings + result.stats.markdownHeadings,
-      totalCleaned: prev.totalCleaned + result.stats.totalCleaned,
-    }));
+
+    if (result.stats.totalCleaned > 0) {
+      try {
+        const res = await fetch("/api/stats", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(result.stats),
+        });
+        const updated = await res.json();
+        if (!updated.error) setGlobalStats(updated);
+      } catch {
+        setGlobalStats((prev) => ({
+          hiddenChars: prev.hiddenChars + result.stats.hiddenChars,
+          nonBreakingSpaces: prev.nonBreakingSpaces + result.stats.nonBreakingSpaces,
+          dashesNormalized: prev.dashesNormalized + result.stats.dashesNormalized,
+          quotesNormalized: prev.quotesNormalized + result.stats.quotesNormalized,
+          ellipsesConverted: prev.ellipsesConverted + result.stats.ellipsesConverted,
+          trailingWhitespace: prev.trailingWhitespace + result.stats.trailingWhitespace,
+          asterisksRemoved: prev.asterisksRemoved + result.stats.asterisksRemoved,
+          markdownHeadings: prev.markdownHeadings + result.stats.markdownHeadings,
+          totalCleaned: prev.totalCleaned + result.stats.totalCleaned,
+        }));
+      }
+    }
   }, [input, options]);
 
   const handleCopy = useCallback(async () => {
